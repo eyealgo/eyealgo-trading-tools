@@ -1,0 +1,239 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © EyeAlgo
+
+//@version=6
+strategy("Supertrend Strategy with HTF Filter & Info Panel [Eye Algo]", shorttitle="Supertrend Pro", overlay=true, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.02, slippage=1, process_orders_on_close=true)
+
+// ═══════════════════════════════════════════════════════════════
+//  SUPERTREND  (classic ATR band algorithm)
+// ═══════════════════════════════════════════════════════════════
+G_ST = "Supertrend"
+atrLen    = input.int(10, "ATR period", minval=1, group=G_ST)
+src       = input.source(hl2, "Source", group=G_ST)
+mult      = input.float(3.0, "ATR multiplier", minval=0.1, step=0.1, group=G_ST)
+rmaATR    = input.bool(true, "Change ATR calculation method (RMA)", group=G_ST, tooltip="On = RMA (Wilder) ATR, Off = simple average of true range")
+showSig   = input.bool(true, "Show Buy/Sell labels", group=G_ST)
+highlight = input.bool(true, "Highlight trend", group=G_ST)
+
+G_H = "Higher timeframe confirmation"
+useHtf = input.bool(false, "Trade only with higher-timeframe Supertrend", group=G_H)
+htf    = input.timeframe("60", "Confirmation timeframe", group=G_H)
+
+G_X = "Signals & exits"
+reverseSig = input.bool(true, "Reverse on opposite signal", group=G_X, tooltip="Off = the opposite signal only closes the trade")
+slType   = input.string("Supertrend line", "Stop loss", options=["Supertrend line", "ATR", "Fixed ticks", "Percent"], group=G_X)
+slAtrLen = input.int(14, "SL ATR length", minval=1, group=G_X)
+slAtrMul = input.float(1.5, "SL ATR multiplier", minval=0.1, step=0.1, group=G_X)
+slTicks  = input.int(300, "Fixed stop (ticks)", minval=1, group=G_X)
+slPct    = input.float(1.0, "Stop (%)", minval=0.01, step=0.1, group=G_X)
+tpType   = input.string("Risk:Reward", "Take profit", options=["Risk:Reward", "Fixed ticks", "None (exit on flip)"], group=G_X)
+tpTicks  = input.int(600, "Fixed TP (ticks)", minval=1, group=G_X)
+lineTrail = input.bool(true, "Trail stop on the Supertrend line", group=G_X)
+showPanel = input.bool(true, "Show info panel", group=G_X)
+
+f_super(simple int len, simple float m, simple bool useRma) =>
+    float a  = useRma ? ta.atr(len) : ta.sma(ta.tr, len)
+    float up = src - m * a
+    float up1 = nz(up[1], up)
+    up := close[1] > up1 ? math.max(up, up1) : up
+    float dn = src + m * a
+    float dn1 = nz(dn[1], dn)
+    dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+    var int tr = 1
+    tr := tr == -1 and close > dn1 ? 1 : tr == 1 and close < up1 ? -1 : tr
+    [up, dn, tr]
+
+[upL, dnL, trend] = f_super(atrLen, mult, rmaATR)
+
+f_htf() =>
+    [u, d, t] = f_super(atrLen, mult, rmaATR)
+    t[1]
+htfTrend = useHtf ? request.security(syminfo.tickerid, htf, f_htf(), lookahead=barmerge.lookahead_on) : 1
+
+buySignal  = trend == 1 and trend[1] == -1
+sellSignal = trend == -1 and trend[1] == 1
+
+mPlot  = plot(ohlc4, "Mid", display=display.none)
+upPlot = plot(trend == 1 ? upL : na, "Up trend", style=plot.style_linebr, linewidth=2, color=color.green)
+dnPlot = plot(trend == 1 ? na : dnL, "Down trend", style=plot.style_linebr, linewidth=2, color=color.red)
+plotshape(buySignal and showSig ? upL : na, "Buy", shape.labelup, location.absolute, color.green, text="Buy", textcolor=color.white, size=size.tiny)
+plotshape(sellSignal and showSig ? dnL : na, "Sell", shape.labeldown, location.absolute, color.red, text="Sell", textcolor=color.white, size=size.tiny)
+fill(mPlot, upPlot, color=highlight and trend == 1 ? color.new(color.green, 90) : na, title="Up highlight")
+fill(mPlot, dnPlot, color=highlight and trend == -1 ? color.new(color.red, 90) : na, title="Down highlight")
+
+alertcondition(buySignal, "Supertrend Buy", "Supertrend Buy on {{ticker}} @ {{close}}")
+alertcondition(sellSignal, "Supertrend Sell", "Supertrend Sell on {{ticker}} @ {{close}}")
+alertcondition(buySignal or sellSignal, "Supertrend direction change", "Supertrend changed direction on {{ticker}}")
+
+// ═══════════════════════════════════════════════════════════════
+//  HOOKS FOR THE TRADE ENGINE
+// ═══════════════════════════════════════════════════════════════
+slAtr    = ta.atr(slAtrLen)
+baseDist = slType == "ATR" ? slAtr * slAtrMul : slType == "Fixed ticks" ? slTicks * syminfo.mintick : close * slPct / 100
+longSig      = buySignal and (not useHtf or htfTrend == 1) and (reverseSig or strategy.position_size == 0)
+shortSig     = sellSignal and (not useHtf or htfTrend == -1) and (reverseSig or strategy.position_size == 0)
+exitLongSig  = sellSignal
+exitShortSig = buySignal
+exitTag      = "Supertrend flip"
+float slLongPrice  = slType == "Supertrend line" ? upL : close - baseDist
+float slShortPrice = slType == "Supertrend line" ? dnL : close + baseDist
+float tpLongPrice  = tpType == "Fixed ticks" ? close + tpTicks * syminfo.mintick : na
+float tpShortPrice = tpType == "Fixed ticks" ? close - tpTicks * syminfo.mintick : na
+bool  noTP         = tpType == "None (exit on flip)"
+entryTagL = "ST Buy"
+entryTagS = "ST Sell"
+float trailLongPrice  = lineTrail and trend == 1 ? upL : na
+float trailShortPrice = lineTrail and trend == -1 ? dnL : na
+
+// ═══════════════════════════════════════════════════════════════
+//  TRADE MANAGEMENT  (shared Eye Algo engine)
+// ═══════════════════════════════════════════════════════════════
+G_TM = "Trade management"
+tradeDir  = input.string("Both", "Trade direction", options=["Both", "Long only", "Short only"], group=G_TM)
+rr        = input.float(2.0, "Take profit (Risk:Reward)", minval=0.1, step=0.1, group=G_TM)
+usePart   = input.bool(true, "Partial close at 1R", group=G_TM)
+partPct   = input.int(50, "Partial close (%)", minval=1, maxval=99, group=G_TM)
+useBE     = input.bool(true, "Move stop to break-even after partial", group=G_TM)
+useTrail  = input.bool(false, "ATR trailing stop", group=G_TM)
+trailLen  = input.int(14, "Trailing ATR length", minval=1, group=G_TM)
+trailMult = input.float(2.0, "Trailing ATR multiplier", minval=0.1, step=0.1, group=G_TM)
+
+G_PS = "Position size"
+sizeMode  = input.string("Fixed quantity", "Size mode", options=["Fixed quantity", "% risk of equity"], group=G_PS)
+fixedQty  = input.float(1.0, "Fixed quantity", minval=0.000001, group=G_PS)
+riskPct   = input.float(1.0, "Risk per trade (%)", minval=0.01, step=0.1, group=G_PS)
+
+G_VIS = "Visuals"
+showLvls  = input.bool(true, "Show entry / SL / TP lines", group=G_VIS)
+
+trailAtr = ta.atr(trailLen)
+
+calcQty(float dist) =>
+    float q = sizeMode == "Fixed quantity" or dist <= 0 ? fixedQty : strategy.equity * riskPct / 100.0 / (dist * syminfo.pointvalue)
+    math.max(q, 0.0)
+
+var float ep  = na
+var float sl  = na
+var float tp  = na
+var float tp1 = na
+var int   side = 0
+var bool  partDone = false
+bool entered = false
+
+allowL = tradeDir != "Short only"
+allowS = tradeDir != "Long only"
+bool goL = longSig  and allowL and side != 1  and not na(slLongPrice)  and close - slLongPrice > 0
+bool goS = shortSig and allowS and side != -1 and not na(slShortPrice) and slShortPrice - close > 0
+if goL and goS
+    goS := false
+
+// signal-based exits
+if side == 1 and exitLongSig and not goS
+    strategy.close("Long", comment=exitTag)
+    side := 0
+if side == -1 and exitShortSig and not goL
+    strategy.close("Short", comment=exitTag)
+    side := 0
+
+// entries
+if goL
+    float d = close - slLongPrice
+    ep  := close
+    sl  := slLongPrice
+    tp  := noTP ? na : na(tpLongPrice) ? close + d * rr : tpLongPrice > close ? tpLongPrice : na
+    tp1 := close + d
+    partDone := false
+    side := 1
+    entered := true
+    strategy.cancel("S-TP1")
+    strategy.cancel("S-Exit")
+    strategy.entry("Long", strategy.long, qty=calcQty(d), comment=entryTagL)
+    alert(syminfo.ticker + " BUY @ " + str.tostring(close, format.mintick) + " | SL " + str.tostring(sl, format.mintick), alert.freq_once_per_bar_close)
+else if goS
+    float d = slShortPrice - close
+    ep  := close
+    sl  := slShortPrice
+    tp  := noTP ? na : na(tpShortPrice) ? close - d * rr : tpShortPrice < close ? tpShortPrice : na
+    tp1 := close - d
+    partDone := false
+    side := -1
+    entered := true
+    strategy.cancel("L-TP1")
+    strategy.cancel("L-Exit")
+    strategy.entry("Short", strategy.short, qty=calcQty(d), comment=entryTagS)
+    alert(syminfo.ticker + " SELL @ " + str.tostring(close, format.mintick) + " | SL " + str.tostring(sl, format.mintick), alert.freq_once_per_bar_close)
+
+if not entered and strategy.position_size == 0 and side != 0 and not na(strategy.position_size[1])
+    side := 0
+
+// management
+if side == 1 and not entered
+    if usePart and not partDone and (na(tp) or tp1 < tp) and high >= tp1
+        partDone := true
+    if useBE and partDone
+        sl := math.max(sl, ep)
+    if useTrail
+        float t = close - trailAtr * trailMult
+        if t < close
+            sl := math.max(sl, t)
+    if not na(trailLongPrice) and trailLongPrice < close
+        sl := math.max(sl, trailLongPrice)
+if side == -1 and not entered
+    if usePart and not partDone and (na(tp) or tp1 > tp) and low <= tp1
+        partDone := true
+    if useBE and partDone
+        sl := math.min(sl, ep)
+    if useTrail
+        float t = close + trailAtr * trailMult
+        if t > close
+            sl := math.min(sl, t)
+    if not na(trailShortPrice) and trailShortPrice > close
+        sl := math.min(sl, trailShortPrice)
+
+// exit orders
+if side == 1
+    if usePart and not partDone and (na(tp) or tp1 < tp)
+        strategy.exit("L-TP1", "Long", qty_percent=partPct, limit=tp1, stop=sl, comment_profit="TP1", comment_loss="SL")
+    strategy.exit("L-Exit", "Long", limit=tp, stop=sl, comment_profit="TP", comment_loss=partDone ? "Stop (BE/trail)" : "SL")
+if side == -1
+    if usePart and not partDone and (na(tp) or tp1 > tp)
+        strategy.exit("S-TP1", "Short", qty_percent=partPct, limit=tp1, stop=sl, comment_profit="TP1", comment_loss="SL")
+    strategy.exit("S-Exit", "Short", limit=tp, stop=sl, comment_profit="TP", comment_loss=partDone ? "Stop (BE/trail)" : "SL")
+
+plot(showLvls and side != 0 ? ep : na, "Entry", color=color.new(color.gray, 20), style=plot.style_linebr, force_overlay=true)
+plot(showLvls and side != 0 ? sl : na, "Stop loss", color=color.new(color.red, 0), style=plot.style_linebr, force_overlay=true)
+plot(showLvls and side != 0 ? tp : na, "Take profit", color=color.new(color.green, 0), style=plot.style_linebr, force_overlay=true)
+
+
+// ═══════════════════════════════════════════════════════════════
+//  INFO PANEL
+// ═══════════════════════════════════════════════════════════════
+var table panel = table.new(position.top_right, 2, 8, bgcolor=color.new(#0f1115, 10), border_color=color.new(#2a2f38, 0), border_width=1)
+if showPanel and barstate.islast
+    txt = color.new(#e6e8eb, 0)
+    stLine = trend == 1 ? upL : dnL
+    int wins = 0
+    float gp = 0.0
+    float gl = 0.0
+    if strategy.closedtrades > 0
+        for i = 0 to strategy.closedtrades - 1
+            float p = strategy.closedtrades.profit(i)
+            wins += p > 0 ? 1 : 0
+            gp += p > 0 ? p : 0
+            gl += p < 0 ? -p : 0
+    table.cell(panel, 0, 0, "Supertrend Pro", text_color=color.new(#f0883e, 0), text_size=size.small)
+    table.cell(panel, 1, 0, syminfo.ticker + " " + timeframe.period, text_color=txt, text_size=size.small)
+    table.cell(panel, 0, 1, "Trend", text_color=txt, text_size=size.small)
+    table.cell(panel, 1, 1, trend == 1 ? "UP" : "DOWN", text_color=trend == 1 ? color.green : color.red, text_size=size.small)
+    table.cell(panel, 0, 2, "HTF (" + htf + ")", text_color=txt, text_size=size.small)
+    table.cell(panel, 1, 2, not useHtf ? "off" : htfTrend == 1 ? "UP" : "DOWN", text_color=not useHtf ? txt : htfTrend == 1 ? color.green : color.red, text_size=size.small)
+    table.cell(panel, 0, 3, "Line / distance", text_color=txt, text_size=size.small)
+    table.cell(panel, 1, 3, str.tostring(stLine, format.mintick) + " / " + str.tostring(math.abs(close - stLine) / syminfo.mintick, "#") + " t", text_color=txt, text_size=size.small)
+    table.cell(panel, 0, 4, "Position", text_color=txt, text_size=size.small)
+    table.cell(panel, 1, 4, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "flat", text_color=txt, text_size=size.small)
+    table.cell(panel, 0, 5, "Open P/L", text_color=txt, text_size=size.small)
+    table.cell(panel, 1, 5, str.tostring(strategy.openprofit, "#.##"), text_color=strategy.openprofit >= 0 ? color.green : color.red, text_size=size.small)
+    table.cell(panel, 0, 6, "Trades / win rate", text_color=txt, text_size=size.small)
+    table.cell(panel, 1, 6, str.tostring(strategy.closedtrades) + " / " + (strategy.closedtrades > 0 ? str.tostring(100.0 * wins / strategy.closedtrades, "#.#") + "%" : "-"), text_color=txt, text_size=size.small)
+    table.cell(panel, 0, 7, "Net P/L / PF", text_color=txt, text_size=size.small)
+    table.cell(panel, 1, 7, str.tostring(strategy.netprofit, "#.##") + " / " + (gl > 0 ? str.tostring(gp / gl, "#.##") : "-"), text_color=strategy.netprofit >= 0 ? color.green : color.red, text_size=size.small)

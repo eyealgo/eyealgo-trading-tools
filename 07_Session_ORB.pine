@@ -1,0 +1,390 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © EyeAlgo
+
+//@version=6
+strategy("Session Opening Range Breakout Strategy [Eye Algo]", shorttitle="Session ORB", overlay=true, max_boxes_count=500, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.02, slippage=1, process_orders_on_close=true)
+
+// ═══════════════════════════════════════════════════════════════
+//  SESSIONS
+// ═══════════════════════════════════════════════════════════════
+G_S = "Sessions"
+tz = input.string("UTC", "Time zone", options=["UTC", "Exchange", "Asia/Kolkata", "Europe/London", "America/New_York", "Asia/Tokyo", "Asia/Dubai"], group=G_S)
+
+G_TK = "Tokyo"
+tkOn    = input.bool(true, "Enabled", group=G_TK)
+tkStart = input.string("00:00", "Range start (HH:MM)", group=G_TK)
+tkDur   = input.int(60, "Range duration (minutes)", minval=1, group=G_TK)
+tkEnd   = input.string("06:00", "Session end (HH:MM)", group=G_TK)
+tkMax   = input.int(1, "Max trades", minval=1, group=G_TK)
+tkCol   = input.color(color.new(#6e7bf2, 0), "Box colour", group=G_TK)
+
+G_LD = "London"
+ldOn    = input.bool(true, "Enabled", group=G_LD)
+ldStart = input.string("07:00", "Range start (HH:MM)", group=G_LD)
+ldDur   = input.int(60, "Range duration (minutes)", minval=1, group=G_LD)
+ldEnd   = input.string("11:00", "Session end (HH:MM)", group=G_LD)
+ldMax   = input.int(2, "Max trades", minval=1, group=G_LD)
+ldCol   = input.color(color.new(#22b07d, 0), "Box colour", group=G_LD)
+
+G_NY = "New York"
+nyOn    = input.bool(true, "Enabled", group=G_NY)
+nyStart = input.string("13:30", "Range start (HH:MM)", group=G_NY)
+nyDur   = input.int(30, "Range duration (minutes)", minval=1, group=G_NY)
+nyEnd   = input.string("17:00", "Session end (HH:MM)", group=G_NY)
+nyMax   = input.int(2, "Max trades", minval=1, group=G_NY)
+nyCol   = input.color(color.new(#f0883e, 0), "Box colour", group=G_NY)
+
+G_EN = "Entry"
+entryMode = input.string("Candle close", "Entry on", options=["Candle close", "Touch (stop order)"], group=G_EN)
+tradeDir  = input.string("Both", "Trade direction", options=["Both", "Long only", "Short only"], group=G_EN)
+reverseSL = input.bool(false, "Reverse after stop loss", group=G_EN)
+exitEnd   = input.bool(true, "Close trade at session end", group=G_EN)
+minRange  = input.int(0, "Min range (ticks, 0 = off)", minval=0, group=G_EN)
+maxRange  = input.int(0, "Max range (ticks, 0 = off)", minval=0, group=G_EN)
+
+G_SL = "Stop loss & take profit"
+slType   = input.string("Opposite side of range", "Stop loss", options=["Opposite side of range", "Middle of range", "Fixed ticks", "ATR"], group=G_SL)
+slTicks  = input.int(200, "Fixed stop (ticks)", minval=1, group=G_SL)
+slAtrLen = input.int(14, "ATR length", minval=1, group=G_SL)
+slAtrMul = input.float(1.5, "ATR multiplier", minval=0.1, step=0.1, group=G_SL)
+tpType   = input.string("Risk:Reward", "Take profit", options=["Risk:Reward", "Fixed ticks", "None (session end)"], group=G_SL)
+rr       = input.float(2.0, "Risk:Reward", minval=0.1, step=0.1, group=G_SL)
+tpTicks  = input.int(400, "Fixed TP (ticks)", minval=1, group=G_SL)
+
+G_TM = "Trade management"
+usePart   = input.bool(true, "Partial close at 1R", group=G_TM)
+partPct   = input.int(50, "Partial close (%)", minval=1, maxval=99, group=G_TM)
+useBE     = input.bool(true, "Move stop to break-even after partial", group=G_TM)
+useTrail  = input.bool(false, "ATR trailing stop", group=G_TM)
+trailLen  = input.int(14, "Trailing ATR length", minval=1, group=G_TM)
+trailMult = input.float(2.0, "Trailing ATR multiplier", minval=0.1, step=0.1, group=G_TM)
+
+G_PS = "Position size"
+sizeMode = input.string("Fixed quantity", "Size mode", options=["Fixed quantity", "% risk of equity"], group=G_PS)
+fixedQty = input.float(1.0, "Fixed quantity", minval=0.000001, group=G_PS)
+riskPct  = input.float(1.0, "Risk per trade (%)", minval=0.01, step=0.1, group=G_PS)
+
+G_D = "Days & limits"
+dMon = input.bool(true, "Mon", inline="d", group=G_D)
+dTue = input.bool(true, "Tue", inline="d", group=G_D)
+dWed = input.bool(true, "Wed", inline="d", group=G_D)
+dThu = input.bool(true, "Thu", inline="d", group=G_D)
+dFri = input.bool(true, "Fri", inline="d", group=G_D)
+dSat = input.bool(false, "Sat", inline="d", group=G_D)
+dSun = input.bool(false, "Sun", inline="d", group=G_D)
+dayLoss  = input.float(0.0, "Daily loss limit (%, 0 = off)", minval=0, step=0.5, group=G_D)
+dayGain  = input.float(0.0, "Daily profit target (%, 0 = off)", minval=0, step=0.5, group=G_D)
+monLoss  = input.float(0.0, "Monthly loss limit (%, 0 = off)", minval=0, step=0.5, group=G_D)
+monGain  = input.float(0.0, "Monthly profit target (%, 0 = off)", minval=0, step=0.5, group=G_D)
+
+G_V = "Visuals"
+showBox  = input.bool(true, "Show range boxes", group=G_V)
+showDash = input.bool(true, "Show session dashboard", group=G_V)
+showLvls = input.bool(true, "Show entry / SL / TP lines", group=G_V)
+
+if not timeframe.isintraday
+    runtime.error("Use an intraday chart for the Session ORB strategy")
+
+// ═══════════════════════════════════════════════════════════════
+//  HELPERS
+// ═══════════════════════════════════════════════════════════════
+tzStr = tz == "Exchange" ? syminfo.timezone : tz
+
+toMin(string hhmm) =>
+    parts = str.split(hhmm, ":")
+    array.size(parts) == 2 ? int(str.tonumber(array.get(parts, 0))) * 60 + int(str.tonumber(array.get(parts, 1))) : 0
+
+type Sess
+    string name
+    bool   on
+    int    startMin
+    int    dur
+    int    endMin
+    int    maxTrades
+    color  col
+    float  hi       = na
+    float  lo       = na
+    int    state    = 0      // 0 waiting, 1 building range, 2 active, 3 done
+    bool   filtered = false
+    int    trades   = 0
+    box    bx       = na
+    float  pnl      = 0.0
+    int    n        = 0
+    int    wins     = 0
+
+var array<Sess> sess = array.from(
+     Sess.new("Tokyo", tkOn, toMin(tkStart), tkDur, toMin(tkEnd), tkMax, tkCol),
+     Sess.new("London", ldOn, toMin(ldStart), ldDur, toMin(ldEnd), ldMax, ldCol),
+     Sess.new("New York", nyOn, toMin(nyStart), nyDur, toMin(nyEnd), nyMax, nyCol))
+
+barMin = hour(time, tzStr) * 60 + minute(time, tzStr)
+dow    = dayofweek(time, tzStr)
+dayOk  = (dow == dayofweek.monday and dMon) or (dow == dayofweek.tuesday and dTue) or (dow == dayofweek.wednesday and dWed) or (dow == dayofweek.thursday and dThu) or (dow == dayofweek.friday and dFri) or (dow == dayofweek.saturday and dSat) or (dow == dayofweek.sunday and dSun)
+
+slAtr    = ta.atr(slAtrLen)
+trailAtr = ta.atr(trailLen)
+
+calcQty(float dist) =>
+    float q = sizeMode == "Fixed quantity" or dist <= 0 ? fixedQty : strategy.equity * riskPct / 100.0 / (dist * syminfo.pointvalue)
+    math.max(q, 0.0)
+
+slPrice(int dir, float entry, Sess s) =>
+    float d = slType == "Fixed ticks" ? slTicks * syminfo.mintick : slType == "ATR" ? slAtr * slAtrMul : na
+    slType == "Opposite side of range" ? (dir == 1 ? s.lo : s.hi) : slType == "Middle of range" ? (s.hi + s.lo) / 2 : entry - dir * d
+
+tpPrice(int dir, float entry, float stop) =>
+    tpType == "Risk:Reward" ? entry + dir * math.abs(entry - stop) * rr : tpType == "Fixed ticks" ? entry + dir * tpTicks * syminfo.mintick : na
+
+// ═══════════════════════════════════════════════════════════════
+//  DAILY / MONTHLY LIMITS
+// ═══════════════════════════════════════════════════════════════
+var float dayEq = strategy.initial_capital
+var float monEq = strategy.initial_capital
+var bool  dayBlocked = false
+var bool  monBlocked = false
+newDay   = dayofmonth(time, tzStr) != dayofmonth(time[1], tzStr)
+newMonth = month(time, tzStr) != month(time[1], tzStr)
+if newDay
+    dayEq := strategy.equity
+    dayBlocked := false
+if newMonth
+    monEq := strategy.equity
+    monBlocked := false
+dayPct = (strategy.equity - dayEq) / dayEq * 100
+monPct = (strategy.equity - monEq) / monEq * 100
+if (dayLoss > 0 and dayPct <= -dayLoss) or (dayGain > 0 and dayPct >= dayGain)
+    dayBlocked := true
+if (monLoss > 0 and monPct <= -monLoss) or (monGain > 0 and monPct >= monGain)
+    monBlocked := true
+limitHit = dayBlocked or monBlocked
+
+// ═══════════════════════════════════════════════════════════════
+//  POSITION STATE
+// ═══════════════════════════════════════════════════════════════
+var int    side  = 0
+var float  ep    = na
+var float  sl    = na
+var float  tp    = na
+var float  tp1   = na
+var bool   partDone = false
+var int    owner = -1
+// pending touch orders
+var float  pLsl = na
+var float  pLtp = na
+var float  pSsl = na
+var float  pStp = na
+var int    pOwner = -1
+
+placeExits(int dir, float stop, float target, float t1, bool pd) =>
+    if dir == 1
+        if usePart and not pd and (na(target) or t1 < target)
+            strategy.exit("L-TP1", "Long", qty_percent=partPct, limit=t1, stop=stop, comment_profit="TP1", comment_loss="SL")
+        strategy.exit("L-Exit", "Long", limit=target, stop=stop, comment_profit="TP", comment_loss=pd ? "Stop (BE/trail)" : "SL")
+    else
+        if usePart and not pd and (na(target) or t1 > target)
+            strategy.exit("S-TP1", "Short", qty_percent=partPct, limit=t1, stop=stop, comment_profit="TP1", comment_loss="SL")
+        strategy.exit("S-Exit", "Short", limit=target, stop=stop, comment_profit="TP", comment_loss=pd ? "Stop (BE/trail)" : "SL")
+
+bool entered = false
+
+// detect a filled touch order
+if side == 0 and strategy.position_size != 0 and pOwner >= 0
+    side  := strategy.position_size > 0 ? 1 : -1
+    ep    := strategy.position_avg_price
+    sl    := side == 1 ? pLsl : pSsl
+    tp    := side == 1 ? pLtp : pStp
+    tp1   := ep + side * math.abs(ep - sl)
+    partDone := false
+    owner := pOwner
+    Sess so = array.get(sess, owner)
+    so.trades += 1
+    entered := true
+    alert(syminfo.ticker + " ORB " + so.name + (side == 1 ? " BUY" : " SELL") + " filled @ " + str.tostring(ep, format.mintick), alert.freq_once_per_bar_close)
+
+// detect a closed position
+lastExitSL = strategy.closedtrades > 0 and strategy.closedtrades.exit_comment(strategy.closedtrades - 1) == "SL"
+bool wantReverse = false
+int  revDir = 0
+if side != 0 and strategy.position_size == 0 and not entered
+    wantReverse := reverseSL and lastExitSL and strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1) == bar_index
+    revDir := -side
+    side := 0
+
+// ═══════════════════════════════════════════════════════════════
+//  SESSION ENGINE
+// ═══════════════════════════════════════════════════════════════
+allowL = tradeDir != "Short only"
+allowS = tradeDir != "Long only"
+tfMs   = timeframe.in_seconds() * 1000
+int  touchOwner = -1
+
+for [i, s] in sess
+    if not s.on
+        continue
+    int rel    = (barMin - s.startMin + 1440) % 1440
+    int endRel = (s.endMin - s.startMin + 1440) % 1440
+    if endRel <= s.dur
+        endRel := 1440
+    if rel < s.dur
+        if s.state != 1
+            s.state := 1
+            s.hi := high
+            s.lo := low
+            s.trades := 0
+            s.filtered := false
+            if showBox
+                s.bx := box.new(time, high, time, low, xloc=xloc.bar_time, border_color=s.col, bgcolor=color.new(s.col, 88), text=s.name, text_size=size.tiny, text_color=s.col, text_halign=text.align_left, text_valign=text.align_top)
+        else
+            s.hi := math.max(s.hi, high)
+            s.lo := math.min(s.lo, low)
+        if showBox and not na(s.bx)
+            box.set_top(s.bx, s.hi)
+            box.set_bottom(s.bx, s.lo)
+            box.set_right(s.bx, time + tfMs)
+    else if rel < endRel
+        if s.state == 1
+            s.state := 2
+            float rngTicks = (s.hi - s.lo) / syminfo.mintick
+            if (minRange > 0 and rngTicks < minRange) or (maxRange > 0 and rngTicks > maxRange)
+                s.filtered := true
+                s.state := 3
+        if s.state == 2 and showBox and not na(s.bx)
+            box.set_right(s.bx, time + tfMs)
+    else
+        if s.state == 1 or s.state == 2
+            s.state := 3
+            if owner == i and side != 0 and exitEnd
+                strategy.close_all(comment=s.name + " session end")
+                side := 0
+                wantReverse := false
+            if pOwner == i and side == 0
+                strategy.cancel("Long")
+                strategy.cancel("Short")
+                pOwner := -1
+
+    bool ready = s.state == 2 and s.trades < s.maxTrades and dayOk and not limitHit and side == 0 and not entered
+    if ready and not na(s.hi)
+        // reverse after SL
+        if wantReverse and owner == i
+            int d = revDir
+            float stp = slPrice(d, close, s)
+            if ((d == 1 and allowL) or (d == -1 and allowS)) and not na(stp) and d * (close - stp) > 0
+                side  := d
+                ep    := close
+                sl    := stp
+                tp    := tpPrice(d, close, stp)
+                tp1   := close + d * math.abs(close - stp)
+                partDone := false
+                s.trades += 1
+                entered := true
+                strategy.entry(d == 1 ? "Long" : "Short", d == 1 ? strategy.long : strategy.short, qty=calcQty(math.abs(close - stp)), comment=s.name + (d == 1 ? " Rev Long" : " Rev Short"))
+            wantReverse := false
+        else if entryMode == "Candle close"
+            bool upB = close > s.hi and close[1] <= s.hi
+            bool dnB = close < s.lo and close[1] >= s.lo
+            int d = upB and allowL ? 1 : dnB and allowS ? -1 : 0
+            if d != 0
+                float stp = slPrice(d, close, s)
+                if not na(stp) and d * (close - stp) > 0
+                    side  := d
+                    ep    := close
+                    sl    := stp
+                    tp    := tpPrice(d, close, stp)
+                    tp1   := close + d * math.abs(close - stp)
+                    partDone := false
+                    owner := i
+                    s.trades += 1
+                    entered := true
+                    strategy.entry(d == 1 ? "Long" : "Short", d == 1 ? strategy.long : strategy.short, qty=calcQty(math.abs(close - stp)), comment=s.name + (d == 1 ? " Long" : " Short"))
+                    alert(syminfo.ticker + " ORB " + s.name + (d == 1 ? " BUY @ " : " SELL @ ") + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+        else if touchOwner < 0
+            touchOwner := i
+            pOwner := i
+            float lsl = slPrice(1, s.hi, s)
+            float ssl = slPrice(-1, s.lo, s)
+            pLsl := lsl
+            pLtp := tpPrice(1, s.hi, lsl)
+            pSsl := ssl
+            pStp := tpPrice(-1, s.lo, ssl)
+            if allowL and close < s.hi and s.hi - lsl > 0
+                strategy.entry("Long", strategy.long, qty=calcQty(s.hi - lsl), stop=s.hi, oca_name="ORB", oca_type=strategy.oca.cancel, comment=s.name + " Long")
+                placeExits(1, lsl, pLtp, s.hi + (s.hi - lsl), false)
+            else
+                strategy.cancel("Long")
+            if allowS and close > s.lo and ssl - s.lo > 0
+                strategy.entry("Short", strategy.short, qty=calcQty(ssl - s.lo), stop=s.lo, oca_name="ORB", oca_type=strategy.oca.cancel, comment=s.name + " Short")
+                placeExits(-1, ssl, pStp, s.lo - (ssl - s.lo), false)
+            else
+                strategy.cancel("Short")
+
+if entryMode == "Touch (stop order)" and touchOwner < 0 and side == 0
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+    pOwner := -1
+
+// limits hit → flat
+if limitHit and strategy.position_size != 0
+    strategy.close_all(comment="P/L limit")
+    side := 0
+
+// ═══════════════════════════════════════════════════════════════
+//  MANAGEMENT
+// ═══════════════════════════════════════════════════════════════
+if side == 1 and not entered
+    if usePart and not partDone and (na(tp) or tp1 < tp) and high >= tp1
+        partDone := true
+    if useBE and partDone
+        sl := math.max(sl, ep)
+    if useTrail
+        sl := math.max(sl, close - trailAtr * trailMult)
+if side == -1 and not entered
+    if usePart and not partDone and (na(tp) or tp1 > tp) and low <= tp1
+        partDone := true
+    if useBE and partDone
+        sl := math.min(sl, ep)
+    if useTrail
+        sl := math.min(sl, close + trailAtr * trailMult)
+if side != 0
+    placeExits(side, sl, tp, tp1, partDone)
+
+plot(showLvls and side != 0 ? ep : na, "Entry", color=color.new(color.gray, 20), style=plot.style_linebr)
+plot(showLvls and side != 0 ? sl : na, "Stop loss", color=color.new(color.red, 0), style=plot.style_linebr)
+plot(showLvls and side != 0 ? tp : na, "Take profit", color=color.new(color.green, 0), style=plot.style_linebr)
+
+// ═══════════════════════════════════════════════════════════════
+//  SESSION STATS & DASHBOARD
+// ═══════════════════════════════════════════════════════════════
+var int lastClosed = 0
+if strategy.closedtrades > lastClosed
+    for k = lastClosed to strategy.closedtrades - 1
+        string ec = strategy.closedtrades.entry_comment(k)
+        float  p  = strategy.closedtrades.profit(k)
+        for s in sess
+            if str.startswith(ec, s.name)
+                s.pnl += p
+                s.n += 1
+                s.wins += p > 0 ? 1 : 0
+    lastClosed := strategy.closedtrades
+
+var table dash = table.new(position.top_right, 5, 6, bgcolor=color.new(#0f1115, 10), border_color=color.new(#2a2f38, 0), border_width=1)
+if showDash and barstate.islast
+    txt = color.new(#e6e8eb, 0)
+    table.cell(dash, 0, 0, "Session", text_color=txt, text_size=size.small)
+    table.cell(dash, 1, 0, "Status", text_color=txt, text_size=size.small)
+    table.cell(dash, 2, 0, "Range", text_color=txt, text_size=size.small)
+    table.cell(dash, 3, 0, "Trades", text_color=txt, text_size=size.small)
+    table.cell(dash, 4, 0, "P&L / Win%", text_color=txt, text_size=size.small)
+    for [i, s] in sess
+        string st = not s.on ? "Off" : s.filtered ? "Filtered" : s.state == 1 ? "Building" : s.state == 2 ? "Active" : s.state == 3 ? "Done" : "Waiting"
+        string rg = na(s.hi) ? "-" : str.tostring((s.hi - s.lo) / syminfo.mintick, "#") + " t"
+        string pl = str.tostring(s.pnl, "#.##") + " / " + (s.n > 0 ? str.tostring(100.0 * s.wins / s.n, "#") + "%" : "-")
+        table.cell(dash, 0, i + 1, s.name, text_color=s.col, text_size=size.small)
+        table.cell(dash, 1, i + 1, st, text_color=txt, text_size=size.small)
+        table.cell(dash, 2, i + 1, rg, text_color=txt, text_size=size.small)
+        table.cell(dash, 3, i + 1, str.tostring(s.trades) + " / " + str.tostring(s.maxTrades), text_color=txt, text_size=size.small)
+        table.cell(dash, 4, i + 1, pl, text_color=s.pnl >= 0 ? color.new(#22b07d, 0) : color.new(#e5484d, 0), text_size=size.small)
+    table.cell(dash, 0, 4, "Day P/L", text_color=txt, text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(dayPct, "#.##") + "%", text_color=dayPct >= 0 ? color.new(#22b07d, 0) : color.new(#e5484d, 0), text_size=size.small)
+    table.cell(dash, 2, 4, "Month P/L", text_color=txt, text_size=size.small)
+    table.cell(dash, 3, 4, str.tostring(monPct, "#.##") + "%", text_color=monPct >= 0 ? color.new(#22b07d, 0) : color.new(#e5484d, 0), text_size=size.small)
+    table.cell(dash, 4, 4, limitHit ? "Limit hit" : "", text_color=color.new(#f0883e, 0), text_size=size.small)

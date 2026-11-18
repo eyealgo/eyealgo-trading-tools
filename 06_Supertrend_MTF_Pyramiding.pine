@@ -1,0 +1,183 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © EyeAlgo
+
+//@version=6
+strategy("Supertrend Multi-Timeframe Pyramiding Strategy [Eye Algo]", shorttitle="ST MTF Pyramiding", overlay=true, pyramiding=5, initial_capital=10000, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.02, slippage=1, process_orders_on_close=true)
+
+// ═══════════════════════════════════════════════════════════════
+//  INPUTS
+// ═══════════════════════════════════════════════════════════════
+G_H = "Trend (higher timeframe)"
+htf  = input.timeframe("240", "Trend timeframe", group=G_H)
+hAtr = input.int(10, "ATR period", minval=1, group=G_H)
+hMul = input.float(3.0, "Multiplier", minval=0.1, step=0.1, group=G_H)
+
+G_E = "Entries (chart timeframe)"
+eAtr = input.int(10, "ATR period", minval=1, group=G_E)
+eMul = input.float(3.0, "Multiplier", minval=0.1, step=0.1, group=G_E)
+
+G_X = "Exits"
+useXtf = input.bool(true, "Exit on exit-timeframe Supertrend flip", group=G_X)
+xtf    = input.timeframe("60", "Exit timeframe", group=G_X)
+xAtr   = input.int(10, "Exit ATR period", minval=1, group=G_X)
+xMul   = input.float(3.0, "Exit multiplier", minval=0.1, step=0.1, group=G_X)
+slMode = input.string("Supertrend line (trailing)", "Stop loss", options=["None", "Supertrend line (trailing)", "ATR (fixed)"], group=G_X)
+slAtrLen = input.int(14, "SL ATR length", minval=1, group=G_X)
+slAtrMul = input.float(2.0, "SL ATR multiplier", minval=0.1, step=0.1, group=G_X)
+
+G_P = "Pyramiding"
+tradeDir = input.string("Both", "Trade direction", options=["Both", "Long only", "Short only"], group=G_P)
+maxPos   = input.int(5, "Max entries per trend", minval=1, maxval=5, group=G_P)
+s1 = input.bool(true, "#1", inline="sl", group=G_P)
+s2 = input.bool(true, "#2", inline="sl", group=G_P)
+s3 = input.bool(true, "#3", inline="sl", group=G_P)
+s4 = input.bool(true, "#4", inline="sl", group=G_P)
+s5 = input.bool(true, "#5", inline="sl", group=G_P, tooltip="Untick an entry number to skip it. The counter still moves on, so unticking #1 means the first signal of a trend is ignored.")
+longQty  = input.float(1.0, "Long quantity per entry", minval=0.000001, group=G_P)
+shortQty = input.float(1.0, "Short quantity per entry", minval=0.000001, group=G_P)
+
+G_V = "Visuals"
+showDash = input.bool(true, "Show dashboard", group=G_V)
+dashPos  = input.string("Top right", "Dashboard position", options=["Top right", "Top left", "Bottom right", "Bottom left"], group=G_V)
+showBg   = input.bool(true, "Tint background with trend", group=G_V)
+
+if timeframe.in_seconds(htf) < timeframe.in_seconds()
+    runtime.error("Trend timeframe must be equal to or higher than the chart timeframe")
+
+// ═══════════════════════════════════════════════════════════════
+//  SUPERTRENDS  (higher timeframes use the last closed bar → no repaint)
+// ═══════════════════════════════════════════════════════════════
+f_st(simple int len, simple float mult) =>
+    [s, d] = ta.supertrend(mult, len)
+    [s[1], d[1]]
+
+[hSt, hDir] = request.security(syminfo.tickerid, htf, f_st(hAtr, hMul), lookahead=barmerge.lookahead_on)
+[xSt, xDir] = request.security(syminfo.tickerid, xtf, f_st(xAtr, xMul), lookahead=barmerge.lookahead_on)
+[eSt, eDir] = ta.supertrend(eMul, eAtr)
+
+eBuy  = eDir < 0 and eDir[1] > 0
+eSell = eDir > 0 and eDir[1] < 0
+xUpToDn = xDir > 0 and nz(xDir[1]) < 0
+xDnToUp = xDir < 0 and nz(xDir[1]) > 0
+
+plot(eDir < 0 ? eSt : na, "Entry ST up", color=color.new(#22b07d, 0), style=plot.style_linebr, linewidth=2)
+plot(eDir > 0 ? eSt : na, "Entry ST down", color=color.new(#e5484d, 0), style=plot.style_linebr, linewidth=2)
+bgcolor(showBg ? (hDir < 0 ? color.new(#22b07d, 93) : hDir > 0 ? color.new(#e5484d, 93) : na) : na, title="Trend background")
+
+// ═══════════════════════════════════════════════════════════════
+//  PYRAMIDING LOGIC
+// ═══════════════════════════════════════════════════════════════
+slotOn(int n) =>
+    n == 1 ? s1 : n == 2 ? s2 : n == 3 ? s3 : n == 4 ? s4 : s5
+
+slAtr = ta.atr(slAtrLen)
+var array<float> slArr = array.new_float(5, na)
+var int trendSide = 0
+var int slotCount = 0
+
+curSide = hDir < 0 ? 1 : hDir > 0 ? -1 : 0
+if curSide != trendSide
+    if strategy.position_size != 0
+        strategy.close_all(comment="Trend flip")
+    trendSide := curSide
+    slotCount := 0
+    array.fill(slArr, na)
+
+if useXtf and strategy.position_size > 0 and xUpToDn
+    strategy.close_all(comment="Exit TF flip")
+if useXtf and strategy.position_size < 0 and xDnToUp
+    strategy.close_all(comment="Exit TF flip")
+
+canLong  = tradeDir != "Short only" and trendSide == 1 and eBuy and slotCount < maxPos and not (useXtf and xUpToDn)
+canShort = tradeDir != "Long only" and trendSide == -1 and eSell and slotCount < maxPos and not (useXtf and xDnToUp)
+
+if canLong
+    slotCount += 1
+    if slotOn(slotCount)
+        string id = "L" + str.tostring(slotCount)
+        array.set(slArr, slotCount - 1, slMode == "ATR (fixed)" ? close - slAtr * slAtrMul : na)
+        strategy.entry(id, strategy.long, qty=longQty, comment="Long #" + str.tostring(slotCount))
+        alert(syminfo.ticker + " ST MTF: Long #" + str.tostring(slotCount) + " @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+if canShort
+    slotCount += 1
+    if slotOn(slotCount)
+        string id = "S" + str.tostring(slotCount)
+        array.set(slArr, slotCount - 1, slMode == "ATR (fixed)" ? close + slAtr * slAtrMul : na)
+        strategy.entry(id, strategy.short, qty=shortQty, comment="Short #" + str.tostring(slotCount))
+        alert(syminfo.ticker + " ST MTF: Short #" + str.tostring(slotCount) + " @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+
+// stops for every open entry
+if slMode != "None" and strategy.position_size != 0
+    for i = 1 to 5
+        string n = str.tostring(i)
+        if strategy.position_size > 0
+            float st = slMode == "Supertrend line (trailing)" ? (eDir < 0 ? eSt : na) : array.get(slArr, i - 1)
+            if not na(st) and st < close
+                strategy.exit("XL" + n, "L" + n, stop=st, comment_loss="SL")
+        else
+            float st = slMode == "Supertrend line (trailing)" ? (eDir > 0 ? eSt : na) : array.get(slArr, i - 1)
+            if not na(st) and st > close
+                strategy.exit("XS" + n, "S" + n, stop=st, comment_loss="SL")
+
+plotshape(canLong and slotOn(slotCount), "Long entry", shape.triangleup, location.belowbar, color.new(#22b07d, 0), size=size.tiny)
+plotshape(canShort and slotOn(slotCount), "Short entry", shape.triangledown, location.abovebar, color.new(#e5484d, 0), size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════
+//  DASHBOARD
+// ═══════════════════════════════════════════════════════════════
+var int   lastClosed = 0
+var int   lN = 0
+var int   lW = 0
+var float lGP = 0.0
+var float lGL = 0.0
+var int   sN = 0
+var int   sW = 0
+var float sGP = 0.0
+var float sGL = 0.0
+
+if strategy.closedtrades > lastClosed
+    for i = lastClosed to strategy.closedtrades - 1
+        float p = strategy.closedtrades.profit(i)
+        if strategy.closedtrades.size(i) > 0
+            lN += 1
+            lW += p > 0 ? 1 : 0
+            lGP += p > 0 ? p : 0
+            lGL += p < 0 ? -p : 0
+        else
+            sN += 1
+            sW += p > 0 ? 1 : 0
+            sGP += p > 0 ? p : 0
+            sGL += p < 0 ? -p : 0
+    lastClosed := strategy.closedtrades
+
+fPF(float gp, float gl) =>
+    gl > 0 ? str.tostring(gp / gl, "#.##") : gp > 0 ? "∞" : "-"
+fWR(int w, int n) =>
+    n > 0 ? str.tostring(100.0 * w / n, "#.#") + "%" : "-"
+
+pos = dashPos == "Top right" ? position.top_right : dashPos == "Top left" ? position.top_left : dashPos == "Bottom right" ? position.bottom_right : position.bottom_left
+var table dash = table.new(pos, 4, 6, bgcolor=color.new(#0f1115, 10), border_color=color.new(#2a2f38, 0), border_width=1)
+if showDash and barstate.islast
+    txt = color.new(#e6e8eb, 0)
+    table.cell(dash, 0, 0, "ST MTF Pyramiding", text_color=color.new(#f0883e, 0), text_size=size.small)
+    table.merge_cells(dash, 0, 0, 3, 0)
+    table.cell(dash, 0, 1, "Trend (" + htf + ")", text_color=txt, text_size=size.small)
+    table.cell(dash, 1, 1, trendSide == 1 ? "UP" : trendSide == -1 ? "DOWN" : "-", text_color=trendSide == 1 ? color.new(#22b07d, 0) : color.new(#e5484d, 0), text_size=size.small)
+    table.cell(dash, 2, 1, "Entries", text_color=txt, text_size=size.small)
+    table.cell(dash, 3, 1, str.tostring(slotCount) + " / " + str.tostring(maxPos), text_color=txt, text_size=size.small)
+    table.cell(dash, 0, 2, "", text_size=size.small)
+    table.cell(dash, 1, 2, "Trades", text_color=txt, text_size=size.small)
+    table.cell(dash, 2, 2, "Win rate", text_color=txt, text_size=size.small)
+    table.cell(dash, 3, 2, "P&L / PF", text_color=txt, text_size=size.small)
+    table.cell(dash, 0, 3, "Longs", text_color=color.new(#22b07d, 0), text_size=size.small)
+    table.cell(dash, 1, 3, str.tostring(lN), text_color=txt, text_size=size.small)
+    table.cell(dash, 2, 3, fWR(lW, lN), text_color=txt, text_size=size.small)
+    table.cell(dash, 3, 3, str.tostring(lGP - lGL, "#.##") + " / " + fPF(lGP, lGL), text_color=txt, text_size=size.small)
+    table.cell(dash, 0, 4, "Shorts", text_color=color.new(#e5484d, 0), text_size=size.small)
+    table.cell(dash, 1, 4, str.tostring(sN), text_color=txt, text_size=size.small)
+    table.cell(dash, 2, 4, fWR(sW, sN), text_color=txt, text_size=size.small)
+    table.cell(dash, 3, 4, str.tostring(sGP - sGL, "#.##") + " / " + fPF(sGP, sGL), text_color=txt, text_size=size.small)
+    table.cell(dash, 0, 5, "Total", text_color=txt, text_size=size.small)
+    table.cell(dash, 1, 5, str.tostring(lN + sN), text_color=txt, text_size=size.small)
+    table.cell(dash, 2, 5, fWR(lW + sW, lN + sN), text_color=txt, text_size=size.small)
+    table.cell(dash, 3, 5, str.tostring(lGP + sGP - lGL - sGL, "#.##") + " / " + fPF(lGP + sGP, lGL + sGL), text_color=txt, text_size=size.small)
